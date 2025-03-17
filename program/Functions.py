@@ -10,6 +10,8 @@ import os
 import urllib2
 import time
 import datetime
+from email.mime.text import MIMEText
+import smtplib
 
 
 # 导入数据
@@ -37,10 +39,9 @@ def import_stock_data(stock_code, other_columns=[]):
 def import_sh000001_data():
     # 导入指数数据
     df_index = pd.read_csv(config.input_data_path + '/index_data/' + 'sh000001.csv', parse_dates=['date'])
-    df_index = df_index[['date', 'change']]
-    df_index.rename(columns={'date': '交易日期', 'change': '大盘涨跌幅'}, inplace=True)
+    df_index = df_index[['date']]
+    df_index.rename(columns={'date': '交易日期'}, inplace=True)
     df_index.sort_values(by=['交易日期'], inplace=True)
-    df_index.dropna(subset=['大盘涨跌幅'], inplace=True)
     df_index.reset_index(inplace=True, drop=True)
 
     return df_index
@@ -152,9 +153,7 @@ def transfer_to_period_data(df, period_type='m'):
     period_df['成交额'] = df['成交额'].resample(period_type).sum()
     period_df['涨跌幅'] = df['涨跌幅'].resample(period_type).apply(lambda x: (x + 1.0).prod() - 1.0)
 
-    period_df['每天资金曲线'] = df['涨跌幅'].resample(period_type).apply(lambda x: list((x+1).cumprod()))
-    # print period_df
-    # print period_df.iloc[1]['每天资金曲线']
+    period_df['每天涨跌幅'] = df['涨跌幅'].resample(period_type).apply(lambda x: list(x))
     period_df['最后一天涨跌幅'] = df['涨跌幅'].resample(period_type).last()
     period_df['交易天数'] = df['是否交易'].resample(period_type).sum()
     period_df['市场交易天数'] = df['股票代码'].resample(period_type).size()
@@ -169,3 +168,98 @@ def transfer_to_period_data(df, period_type='m'):
 
     return period_df
 
+
+def save_stock_data_from_sina_to_h5(code_list, save_path=config.output_data_path + '/each_stock_data_h5.h5'):
+
+    """
+    从新浪网获取股票数据，然后将股票数据存入指定位置的h5文件中
+    :param code_list:
+    :param save_path:
+    :return:
+    """
+
+    # 拼接抓取数据的网页的地址
+    url = "http://hq.sinajs.cn/list=" + ",".join(code_list)
+
+    # 抓取原始股票数据
+    max_try_num = 5
+    try_num = 0
+    while True:
+        try:
+            content = urllib2.urlopen(url, timeout=10).read().decode("gbk").encode('utf8').strip()
+            break
+        except:
+            print '抓取股票数据失败，10s后重试...'
+            try_num += 1
+            if try_num > max_try_num:
+                print '抓取股票数据失败次数过多，退出...'
+                break
+            time.sleep(10)
+
+    # 接下来即对抓取的字符串进行处理
+    # 遍历每行数据，\n是回车的意思
+    for line in content.split('\n'):
+        line_split = line.split(',')
+        code = line_split[0].split('="')[0][-8:]
+        print code,
+        if len(line_split) == 1:
+            print '股票退市'
+            continue
+        open_price = float(line_split[1])
+        if open_price - 0.0 < 0.0001:
+            print '股票停牌'
+            continue
+        print
+
+        # 从line中读取数据
+        df = pd.DataFrame()
+        now_time = pd.to_datetime(datetime.datetime.now())  # 使用当前时间作为index。抓取数据时一定要存抓取的时间。
+        df.loc[now_time, '股票代码'] = code
+        df.loc[now_time, '股票名称'] = line_split[0].split('="')[-1]
+        df.loc[now_time, '开盘价'] = open_price
+        df.loc[now_time, '最高价'] = float(line_split[4])
+        df.loc[now_time, '最低价'] = float(line_split[5])
+        df.loc[now_time, '最新价'] = float(line_split[3])
+        df.loc[now_time, '昨收'] = float(line_split[2])
+        df.loc[now_time, '时间'] = pd.to_datetime(line_split[-3] + u' ' + line_split[-2])
+
+        # 存储数据至h5文件
+        # 可以把hdf理解成一个数据库
+        df.to_hdf(save_path, code, mode='a', append=True, format='table')
+
+
+def auto_send_email(to_address, subject, content, from_address='your_email_address@foxmail.com'):
+    """
+    :param to_address: 收件箱地址
+    :param subject: 邮件主题
+    :param content: 邮件内容
+    :param from_address: 发件箱地址
+    :return:
+    使用qq邮箱发送邮件的程序。一般用于报错提醒，需要去qq邮箱中开通密码
+    """
+    max_try_num = 5
+    try_num = 0
+    while True:
+        try:
+            msg = MIMEText(datetime.datetime.now().strftime("%m-%d %H:%M:%S") + ' ' + content)
+            msg["Subject"] = subject + ' ' + datetime.datetime.now().strftime("%m-%d %H:%M:%S")
+            msg["From"] = from_address
+            msg["To"] = to_address
+
+            username = from_address
+            # 此处password为授权码，需要在qq邮箱中设置获取，
+            # 设置教程http://service.mail.qq.com/cgi-bin/help?subtype=1&&no=1001256&&id=28
+            password = 'aaaabbbbccccdddd'  # 此为假密码，请填写真实的密码
+
+            server = smtplib.SMTP('smtp.qq.com')
+            server.starttls()
+            server.login(username, password)
+            server.sendmail(from_address, to_address, msg.as_string())
+            server.quit()
+            print '邮件发送成功'
+            break
+        except:
+            print '邮件发送失败'
+            try_num += 1
+            if try_num > max_try_num:
+                break
